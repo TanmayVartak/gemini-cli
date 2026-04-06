@@ -440,10 +440,16 @@ export class WindowsSandboxManager implements SandboxManager {
     }
   }
 
-  async parseDenials(
-    result: ShellExecutionResult,
-  ): Promise<ParsedSandboxDenial[]> {
+  parseDenials(result: ShellExecutionResult): ParsedSandboxDenial | undefined {
     return parseWindowsSandboxDenials(result);
+  }
+
+  getWorkspace(): string {
+    return this.options.workspace;
+  }
+
+  getOptions(): GlobalSandboxOptions | undefined {
+    return this.options;
   }
 
   cleanup(): void {
