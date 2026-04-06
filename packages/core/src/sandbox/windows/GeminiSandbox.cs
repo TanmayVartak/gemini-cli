@@ -167,6 +167,53 @@ public class GeminiSandbox {
     [DllImport("kernel32.dll")]
     static extern IntPtr LocalFree(IntPtr hMem);
 
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    struct TOKEN_PRIVILEGES {
+        public uint PrivilegeCount;
+        public LUID_AND_ATTRIBUTES Privileges;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct LUID_AND_ATTRIBUTES {
+        public LUID Luid;
+        public uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct LUID {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges, ref TOKEN_PRIVILEGES NewState, uint BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, out LUID lpLuid);
+
+    private const string SE_SECURITY_NAME = "SeSecurityPrivilege";
+    private const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+    private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+    private const uint TOKEN_QUERY = 0x0008;
+
+    private static void EnablePrivilege(string privilege) {
+        IntPtr hToken;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out hToken)) {
+            try {
+                LUID luid;
+                if (LookupPrivilegeValue(null, privilege, out luid)) {
+                    TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES();
+                    tp.PrivilegeCount = 1;
+                    tp.Privileges.Luid = luid;
+                    tp.Privileges.Attributes = SE_PRIVILEGE_ENABLED;
+                    AdjustTokenPrivileges(hToken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+                }
+            } finally {
+                CloseHandle(hToken);
+            }
+        }
+    }
+
     private const int TokenIntegrityLevel = 25;
     private const uint SE_GROUP_INTEGRITY = 0x00000020;
     private const uint TOKEN_ALL_ACCESS = 0xF01FF;
@@ -410,6 +457,7 @@ public class GeminiSandbox {
     }
 
     private static void ApplyManifest(string manifestPath) {
+        EnablePrivilege(SE_SECURITY_NAME);
         if (!File.Exists(manifestPath)) return;
         foreach (string line in File.ReadAllLines(manifestPath)) {
             if (string.IsNullOrWhiteSpace(line) || line.Length < 3) continue;

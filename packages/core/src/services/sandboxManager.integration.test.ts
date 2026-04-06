@@ -68,7 +68,7 @@ const Platform = {
   /** Returns a path that is strictly outside the workspace and likely blocked. */
   getExternalBlockedPath() {
     return this.isWindows
-      ? 'C:\\Windows\\System32\\drivers\\etc\\hosts'
+      ? 'C:\\gemini_blocked_test.txt'
       : '/Users/Shared/.gemini_test_blocked';
   },
 };
