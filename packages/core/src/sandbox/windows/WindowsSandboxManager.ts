@@ -55,8 +55,8 @@ export class WindowsSandboxManager implements SandboxManager {
   private initialized = false;
 
   /**
-   * Caches paths with modified ACLs to prevent redundant, costly Win32 API calls
-   * across multiple command executions within the same session.
+   * Optimistically caches modified ACLs to prevent redundant Win32 API calls.
+   * Skips even if a previous application failed.
    */
   private readonly allowedCache = new Set<string>();
   private readonly deniedCache = new Set<string>();

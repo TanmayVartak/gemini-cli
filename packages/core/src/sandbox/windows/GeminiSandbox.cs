@@ -582,8 +582,8 @@ public class GeminiSandbox {
                 fs.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier("S-1-16-4096"), FileSystemRights.FullControl, AccessControlType.Deny));
                 File.SetAccessControl(path, fs);
             }
-        } catch (Exception) {
-            // Ignore access errors or path not found
+        } catch (Exception e) {
+            Console.Error.WriteLine("Error in DenyLowIntegrityDacl for " + path + ": " + e.Message);
         }
     }
 }
