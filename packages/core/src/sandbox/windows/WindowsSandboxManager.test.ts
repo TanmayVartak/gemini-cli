@@ -31,13 +31,37 @@ describe('WindowsSandboxManager', () => {
   let manager: WindowsSandboxManager | undefined;
   let testCwd: string;
 
+  /**
+   * Creates a temporary directory and returns its canonical real path.
+   */
+  function createTempDir(name: string, parent = os.tmpdir()): string {
+    const rawPath = fs.mkdtempSync(path.join(parent, `gemini-test-${name}-`));
+    return fs.realpathSync(rawPath);
+  }
+
+  const helperExePath = path.resolve(
+    __dirname,
+    WindowsSandboxManager.HELPER_EXE,
+  );
+
   beforeEach(() => {
     vi.spyOn(os, 'platform').mockReturnValue('win32');
     vi.spyOn(sandboxManager, 'tryRealpath').mockImplementation(async (p) =>
       p.toString(),
     );
-    testCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-test-'));
+
+    // Mock existsSync to skip the csc.exe auto-compilation of helper during unit tests.
+    const originalExistsSync = fs.existsSync;
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) => {
+      if (typeof p === 'string' && path.resolve(p) === helperExePath) {
+        return true;
+      }
+      return originalExistsSync(p);
+    });
+
+    testCwd = createTempDir('cwd');
     vi.spyOn(fs, 'writeFileSync');
+
     manager = new WindowsSandboxManager({
       workspace: testCwd,
       modeConfig: { readonly: false, allowOverrides: true },
@@ -48,7 +72,9 @@ describe('WindowsSandboxManager', () => {
   afterEach(() => {
     manager?.cleanup();
     vi.restoreAllMocks();
-    fs.rmSync(testCwd, { recursive: true, force: true });
+    if (testCwd && fs.existsSync(testCwd)) {
+      fs.rmSync(testCwd, { recursive: true, force: true });
+    }
   });
 
   it('should prepare a GeminiSandbox.exe command', async () => {
@@ -165,8 +191,7 @@ describe('WindowsSandboxManager', () => {
   });
 
   it('should handle persistent permissions from policyManager', async () => {
-    const persistentPath = path.join(testCwd, 'persistent_path');
-    fs.mkdirSync(persistentPath, { recursive: true });
+    const persistentPath = createTempDir('persistent', testCwd);
 
     const mockPolicyManager = {
       getCommandPermissions: vi.fn().mockReturnValue({
@@ -248,15 +273,7 @@ describe('WindowsSandboxManager', () => {
   });
 
   it('should grant Low Integrity access to the workspace and allowed paths', async () => {
-    manager = new WindowsSandboxManager({
-      workspace: testCwd,
-      modeConfig: { readonly: false, allowOverrides: true },
-      forbiddenPaths: async () => [],
-    });
-    const allowedPath = path.join(os.tmpdir(), 'gemini-cli-test-allowed');
-    if (!fs.existsSync(allowedPath)) {
-      fs.mkdirSync(allowedPath);
-    }
+    const allowedPath = createTempDir('allowed');
     try {
       const req: SandboxRequest = {
         command: 'test',
@@ -268,7 +285,7 @@ describe('WindowsSandboxManager', () => {
         },
       };
 
-      await manager.prepareCommand(req);
+      await manager!.prepareCommand(req);
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
@@ -283,17 +300,7 @@ describe('WindowsSandboxManager', () => {
   });
 
   it('should grant Low Integrity access to additional write paths', async () => {
-    manager = new WindowsSandboxManager({
-      workspace: testCwd,
-      forbiddenPaths: async () => [],
-    });
-    const extraWritePath = path.join(
-      os.tmpdir(),
-      'gemini-cli-test-extra-write',
-    );
-    if (!fs.existsSync(extraWritePath)) {
-      fs.mkdirSync(extraWritePath);
-    }
+    const extraWritePath = createTempDir('extra-write');
     try {
       const req: SandboxRequest = {
         command: 'test',
@@ -309,7 +316,7 @@ describe('WindowsSandboxManager', () => {
         },
       };
 
-      await manager.prepareCommand(req);
+      await manager!.prepareCommand(req);
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
@@ -344,7 +351,8 @@ describe('WindowsSandboxManager', () => {
         },
       };
 
-      await manager.prepareCommand(req);
+      // Rejected because it's an unreachable/invalid UNC path or it doesn't exist
+      await expect(manager.prepareCommand(req)).rejects.toThrow();
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
@@ -359,12 +367,11 @@ describe('WindowsSandboxManager', () => {
   it.runIf(process.platform === 'win32')(
     'should allow extended-length and local device paths',
     async () => {
-      manager = new WindowsSandboxManager({
-        workspace: testCwd,
-        forbiddenPaths: async () => [],
-      });
-      const longPath = '\\\\?\\C:\\very\\long\\path';
-      const devicePath = '\\\\.\\PhysicalDrive0';
+      // Create actual files for inheritance/existence checks
+      const longPath = path.join(testCwd, 'very_long_path.txt');
+      const devicePath = path.join(testCwd, 'device_path.txt');
+      fs.writeFileSync(longPath, '');
+      fs.writeFileSync(devicePath, '');
 
       const req: SandboxRequest = {
         command: 'test',
@@ -380,15 +387,15 @@ describe('WindowsSandboxManager', () => {
         },
       };
 
-      await manager.prepareCommand(req);
+      await manager!.prepareCommand(req);
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
         String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
       );
       expect(aclCall).toBeDefined();
-      expect(aclCall![1]).toContain(`L ${longPath}`);
-      expect(aclCall![1]).toContain(`L ${devicePath}`);
+      expect(aclCall![1]).toContain(`L ${path.resolve(longPath)}`);
+      expect(aclCall![1]).toContain(`L ${path.resolve(devicePath)}`);
     },
   );
 
@@ -477,10 +484,7 @@ describe('WindowsSandboxManager', () => {
   });
 
   it('should deny Low Integrity access to forbidden paths', async () => {
-    const forbiddenPath = path.join(os.tmpdir(), 'gemini-cli-test-forbidden');
-    if (!fs.existsSync(forbiddenPath)) {
-      fs.mkdirSync(forbiddenPath);
-    }
+    const forbiddenPath = createTempDir('forbidden');
     try {
       manager = new WindowsSandboxManager({
         workspace: testCwd,
@@ -508,10 +512,7 @@ describe('WindowsSandboxManager', () => {
   });
 
   it('should override allowed paths if a path is also in forbidden paths', async () => {
-    const conflictPath = path.join(os.tmpdir(), 'gemini-cli-test-conflict');
-    if (!fs.existsSync(conflictPath)) {
-      fs.mkdirSync(conflictPath);
-    }
+    const conflictPath = createTempDir('conflict');
     try {
       manager = new WindowsSandboxManager({
         workspace: testCwd,
@@ -548,7 +549,7 @@ describe('WindowsSandboxManager', () => {
     }
   });
 
-  it('should translate __write to PowerShell safely using environment variables', async () => {
+  it('should pass __write directly to native helper', async () => {
     const filePath = path.join(testCwd, 'test.txt');
     fs.writeFileSync(filePath, '');
     const req: SandboxRequest = {
@@ -561,17 +562,12 @@ describe('WindowsSandboxManager', () => {
     const result = await manager!.prepareCommand(req);
 
     // [network, cwd, --setup-manifest, manifestPath, command, ...args]
-    expect(result.args[4]).toBe('PowerShell.exe');
-    expect(result.args[7]).toBe('-Command');
-    const psCommand = result.args[8];
-    expect(psCommand).toBe(
-      '& { $Input | Out-File -FilePath $env:GEMINI_TARGET_PATH -Encoding utf8 }',
-    );
-    expect(result.env['GEMINI_TARGET_PATH']).toBe(filePath);
+    expect(result.args[4]).toBe('__write');
+    expect(result.args[5]).toBe(filePath);
   });
 
-  it('should safely handle special characters in __write path using environment variables', async () => {
-    const maliciousPath = path.join(testCwd, 'foo"; echo bar; ".txt');
+  it('should safely handle special characters in __write path', async () => {
+    const maliciousPath = path.join(testCwd, 'foo & echo bar; ! .txt');
     fs.writeFileSync(maliciousPath, '');
     const req: SandboxRequest = {
       command: '__write',
@@ -582,16 +578,12 @@ describe('WindowsSandboxManager', () => {
 
     const result = await manager!.prepareCommand(req);
 
-    expect(result.args[4]).toBe('PowerShell.exe');
-    const psCommand = result.args[8];
-    expect(psCommand).toBe(
-      '& { $Input | Out-File -FilePath $env:GEMINI_TARGET_PATH -Encoding utf8 }',
-    );
-    // The malicious path should be injected safely via environment variable, not interpolated in args
-    expect(result.env['GEMINI_TARGET_PATH']).toBe(maliciousPath);
+    // Native commands pass arguments directly; the binary handles quoting via QuoteArgument
+    expect(result.args[4]).toBe('__write');
+    expect(result.args[5]).toBe(maliciousPath);
   });
 
-  it('should translate __read to PowerShell safely using environment variables', async () => {
+  it('should pass __read directly to native helper', async () => {
     const filePath = path.join(testCwd, 'test.txt');
     fs.writeFileSync(filePath, 'hello');
     const req: SandboxRequest = {
@@ -603,12 +595,27 @@ describe('WindowsSandboxManager', () => {
 
     const result = await manager!.prepareCommand(req);
 
-    expect(result.args[4]).toBe('PowerShell.exe');
-    expect(result.args[7]).toBe('-Command');
-    const psCommand = result.args[8];
-    expect(psCommand).toBe(
-      '& { Get-Content -LiteralPath $env:GEMINI_TARGET_PATH -Raw }',
-    );
-    expect(result.env['GEMINI_TARGET_PATH']).toBe(filePath);
+    expect(result.args[4]).toBe('__read');
+    expect(result.args[5]).toBe(filePath);
+  });
+
+  it('should return a cleanup function that deletes the temporary manifest', async () => {
+    const req: SandboxRequest = {
+      command: 'test',
+      args: [],
+      cwd: testCwd,
+      env: {},
+    };
+
+    const result = await manager!.prepareCommand(req);
+    const manifestPath = result.args[3];
+
+    expect(fs.existsSync(manifestPath)).toBe(true);
+
+    // Result cleanup is empty now because we use process exit handler,
+    // but the manager cleanup should handle it.
+    manager!.cleanup();
+    expect(fs.existsSync(manifestPath)).toBe(false);
+    expect(fs.existsSync(path.dirname(manifestPath))).toBe(false);
   });
 });

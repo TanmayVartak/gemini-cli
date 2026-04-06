@@ -5,6 +5,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security;
@@ -19,6 +20,8 @@ using System.Text;
  */
 public class GeminiSandbox {
     // P/Invoke constants and structures
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const int JobObjectNetRateControlInformation = 32;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
     private const uint JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x00000400;
     private const uint JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008;
@@ -71,6 +74,9 @@ public class GeminiSandbox {
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint ResumeThread(IntPtr hThread);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
@@ -168,30 +174,25 @@ public class GeminiSandbox {
     private const int SE_FILE_OBJECT = 1;
     private const uint LABEL_SECURITY_INFORMATION = 0x00000010;
 
+    private static HashSet<string> forbiddenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
     static int Main(string[] args) {
-        if (args.Length < 1) {
-            Console.WriteLine("Usage: GeminiSandbox.exe <network:0|1> <cwd> [--setup-manifest <path>] <command> [args...]");
-            Console.WriteLine("Internal commands: __read <path>, __write <path>, __apply_batch_acls <manifestPath>");
+        if (args.Length < 3) {
+            Console.Error.WriteLine("Usage: GeminiSandbox.exe <network:0|1> <cwd> [--setup-manifest <path>] <command> [args...]");
+            Console.Error.WriteLine("Internal commands: __read <path>, __write <path>, __apply_batch_acls <manifestPath>");
             return 1;
         }
 
         int argIndex = 0;
-        string command = args[argIndex++];
+        string networkArg = args[argIndex++];
+        bool networkAccess = networkArg == "1";
+        string cwd = args[argIndex++];
 
         // Batch ACL command: __apply_batch_acls <manifestPath> (maintained for backward compatibility/standalone use)
-        if (command == "__apply_batch_acls") {
-            if (args.Length < 2) {
-                Console.WriteLine("Error: Missing manifest path for batch ACLs");
-                return 1;
-            }
-            ApplyManifest(args[1]);
+        if (networkArg == "__apply_batch_acls") {
+            ApplyManifest(cwd); // In this case, cwd is actually the manifest path
             return 0;
         }
-
-        // Standard execution flow
-        bool networkAccess = command == "1";
-        if (argIndex >= args.Length) return 1;
-        string cwd = args[argIndex++];
 
         if (argIndex < args.Length && args[argIndex] == "--setup-manifest") {
             if (argIndex + 1 < args.Length) {
@@ -201,30 +202,33 @@ public class GeminiSandbox {
         }
 
         if (argIndex >= args.Length) {
-            Console.WriteLine("Error: Missing command");
+            Console.Error.WriteLine("Error: Missing command");
             return 1;
         }
 
-        string subCommand = args[argIndex];
+        string command = args[argIndex];
 
         IntPtr hToken = IntPtr.Zero;
         IntPtr hRestrictedToken = IntPtr.Zero;
-        IntPtr lowIntegritySid = IntPtr.Zero;
+        IntPtr hJob = IntPtr.Zero;
+        PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
         try {
             // 1. Duplicate Primary Token
             if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, out hToken)) {
-                Console.WriteLine("Error: OpenProcessToken failed (" + Marshal.GetLastWin32Error() + ")");
+                Console.Error.WriteLine("Error: OpenProcessToken failed (" + Marshal.GetLastWin32Error() + ")");
                 return 1;
             }
 
             // Create a restricted token to strip administrative privileges
             if (!CreateRestrictedToken(hToken, DISABLE_MAX_PRIVILEGE, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out hRestrictedToken)) {
-                Console.WriteLine("Error: CreateRestrictedToken failed (" + Marshal.GetLastWin32Error() + ")");
+                Console.Error.WriteLine("Error: CreateRestrictedToken failed (" + Marshal.GetLastWin32Error() + ")");
                 return 1;
             }
 
             // 2. Lower Integrity Level to Low
+            // S-1-16-4096 is the SID for "Low Mandatory Level"
+            IntPtr lowIntegritySid = IntPtr.Zero;
             if (ConvertStringSidToSid("S-1-16-4096", out lowIntegritySid)) {
                 TOKEN_MANDATORY_LABEL tml = new TOKEN_MANDATORY_LABEL();
                 tml.Label.Sid = lowIntegritySid;
@@ -234,7 +238,7 @@ public class GeminiSandbox {
                 try {
                     Marshal.StructureToPtr(tml, pTml, false);
                     if (!SetTokenInformation(hRestrictedToken, TokenIntegrityLevel, pTml, (uint)tmlSize)) {
-                        Console.WriteLine("Error: SetTokenInformation failed (" + Marshal.GetLastWin32Error() + ")");
+                        Console.Error.WriteLine("Error: SetTokenInformation failed (" + Marshal.GetLastWin32Error() + ")");
                         return 1;
                     }
                 } finally {
@@ -243,34 +247,52 @@ public class GeminiSandbox {
             }
 
             // 3. Setup Job Object for cleanup
-            IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
+            hJob = CreateJobObject(IntPtr.Zero, null);
+            if (hJob == IntPtr.Zero) {
+                Console.Error.WriteLine("Error: CreateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
+                return 1;
+            }
+
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
             jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
-            
+
             IntPtr lpJobLimits = Marshal.AllocHGlobal(Marshal.SizeOf(jobLimits));
-            Marshal.StructureToPtr(jobLimits, lpJobLimits, false);
-            SetInformationJobObject(hJob, 9 /* JobObjectExtendedLimitInformation */, lpJobLimits, (uint)Marshal.SizeOf(jobLimits));
-            Marshal.FreeHGlobal(lpJobLimits);
+            try {
+                Marshal.StructureToPtr(jobLimits, lpJobLimits, false);
+                if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, lpJobLimits, (uint)Marshal.SizeOf(jobLimits))) {
+                    Console.Error.WriteLine("Error: SetInformationJobObject(Limits) failed (" + Marshal.GetLastWin32Error() + ")");
+                    return 1;
+                }
+            } finally {
+                Marshal.FreeHGlobal(lpJobLimits);
+            }
 
             if (!networkAccess) {
                 JOBOBJECT_NET_RATE_CONTROL_INFORMATION netLimits = new JOBOBJECT_NET_RATE_CONTROL_INFORMATION();
                 netLimits.MaxBandwidth = 1;
                 netLimits.ControlFlags = 0x1 | 0x2; // ENABLE | MAX_BANDWIDTH
                 netLimits.DscpTag = 0;
-                
+
                 IntPtr lpNetLimits = Marshal.AllocHGlobal(Marshal.SizeOf(netLimits));
-                Marshal.StructureToPtr(netLimits, lpNetLimits, false);
-                SetInformationJobObject(hJob, 32 /* JobObjectNetRateControlInformation */, lpNetLimits, (uint)Marshal.SizeOf(netLimits));
-                Marshal.FreeHGlobal(lpNetLimits);
+                try {
+                    Marshal.StructureToPtr(netLimits, lpNetLimits, false);
+                    if (!SetInformationJobObject(hJob, JobObjectNetRateControlInformation, lpNetLimits, (uint)Marshal.SizeOf(netLimits))) {
+                        // Some versions of Windows might not support network rate control, but we should know if it fails.
+                        Console.Error.WriteLine("Warning: SetInformationJobObject(NetRate) failed (" + Marshal.GetLastWin32Error() + "). Network might not be throttled.");
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(lpNetLimits);
+                }
             }
 
             // 4. Handle Internal Commands or External Process
-            if (subCommand == "__read") {
+            if (command == "__read") {
                 if (argIndex + 1 >= args.Length) {
-                    Console.WriteLine("Error: Missing path for __read");
+                    Console.Error.WriteLine("Error: Missing path for __read");
                     return 1;
                 }
                 string path = args[argIndex + 1];
+                CheckForbidden(path);
                 return RunInImpersonation(hRestrictedToken, () => {
                     try {
                         using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -279,29 +301,37 @@ public class GeminiSandbox {
                         }
                         return 0;
                     } catch (Exception e) {
-                        Console.Error.WriteLine("Error reading file (check permissions): " + e.Message);
+                        Console.Error.WriteLine("Error reading file: " + e.Message);
                         return 1;
                     }
                 });
-            } else if (subCommand == "__write") {
+            } else if (command == "__write") {
                 if (argIndex + 1 >= args.Length) {
-                    Console.WriteLine("Error: Missing path for __write");
+                    Console.Error.WriteLine("Error: Missing path for __write");
                     return 1;
                 }
                 string path = args[argIndex + 1];
-                return RunInImpersonation(hRestrictedToken, () => {
-                    try {
-                        using (StreamReader reader = new StreamReader(Console.OpenStandardInput(), System.Text.Encoding.UTF8))
-                        using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
-                        using (StreamWriter writer = new StreamWriter(fs, System.Text.Encoding.UTF8)) {
-                            writer.Write(reader.ReadToEnd());
+                CheckForbidden(path);
+
+                try {
+                    using (MemoryStream ms = new MemoryStream()) {
+                        // Buffer stdin before impersonation (as restricted token can't read the inherited pipe).
+                        using (Stream stdin = Console.OpenStandardInput()) {
+                            stdin.CopyTo(ms);
                         }
-                        return 0;
-                    } catch (Exception e) {
-                        Console.Error.WriteLine("Error writing file (check permissions): " + e.Message);
-                        return 1;
+
+                        return RunInImpersonation(hRestrictedToken, () => {
+                            using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None)) {
+                                ms.Position = 0;
+                                ms.CopyTo(fs);
+                            }
+                            return 0;
+                        });
                     }
-                });
+                } catch (Exception e) {
+                    Console.Error.WriteLine("Error during __write: " + e.Message);
+                    return 1;
+                }
             }
 
             // External Process
@@ -318,30 +348,48 @@ public class GeminiSandbox {
                 commandLine += QuoteArgument(args[i]);
             }
 
-            PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
-            uint creationFlags = 0;
+            // Creation Flags: 0x01000000 (CREATE_BREAKAWAY_FROM_JOB) to allow job assignment if parent is in job
+            // 0x00000004 (CREATE_SUSPENDED) to prevent the process from executing before being placed in the job
+            uint creationFlags = 0x01000000 | 0x00000004;
             if (!CreateProcessAsUser(hRestrictedToken, null, commandLine, IntPtr.Zero, IntPtr.Zero, true, creationFlags, IntPtr.Zero, cwd, ref si, out pi)) {
-                Console.WriteLine("Error: CreateProcessAsUser failed (" + Marshal.GetLastWin32Error() + ") Command: " + commandLine);
+                int err = Marshal.GetLastWin32Error();
+                Console.Error.WriteLine("Error: CreateProcessAsUser failed (" + err + ") Command: " + commandLine);
                 return 1;
             }
 
-            AssignProcessToJobObject(hJob, pi.hProcess);
-            
-            // Wait for exit
-            uint waitResult = WaitForSingleObject(pi.hProcess, 0xFFFFFFFF);
-            uint exitCode = 0;
-            GetExitCodeProcess(pi.hProcess, out exitCode);
+            if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
+                int err = Marshal.GetLastWin32Error();
+                Console.Error.WriteLine("Error: AssignProcessToJobObject failed (" + err + ") Command: " + commandLine);
+                TerminateProcess(pi.hProcess, 1);
+                return 1;
+            }
 
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            CloseHandle(hJob);
+            ResumeThread(pi.hThread);
+
+            if (WaitForSingleObject(pi.hProcess, 0xFFFFFFFF) == 0xFFFFFFFF) {
+                int err = Marshal.GetLastWin32Error();
+                Console.Error.WriteLine("Error: WaitForSingleObject failed (" + err + ")");
+            }
+            
+            uint exitCode = 0;
+            if (!GetExitCodeProcess(pi.hProcess, out exitCode)) {
+                int err = Marshal.GetLastWin32Error();
+                Console.Error.WriteLine("Error: GetExitCodeProcess failed (" + err + ")");
+                return 1;
+            }
 
             return (int)exitCode;
         } finally {
             if (hToken != IntPtr.Zero) CloseHandle(hToken);
             if (hRestrictedToken != IntPtr.Zero) CloseHandle(hRestrictedToken);
+            if (hJob != IntPtr.Zero) CloseHandle(hJob);
+            if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+            if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
         }
     }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
@@ -351,7 +399,7 @@ public class GeminiSandbox {
 
     private static int RunInImpersonation(IntPtr hToken, Func<int> action) {
         if (!ImpersonateLoggedOnUser(hToken)) {
-            Console.WriteLine("Error: ImpersonateLoggedOnUser failed (" + Marshal.GetLastWin32Error() + ")");
+            Console.Error.WriteLine("Error: ImpersonateLoggedOnUser failed (" + Marshal.GetLastWin32Error() + ")");
             return 1;
         }
         try {
@@ -371,6 +419,31 @@ public class GeminiSandbox {
                 SetLowIntegritySacl(targetPath);
             } else if (op == 'D') {
                 DenyLowIntegrityDacl(targetPath);
+                forbiddenPaths.Add(GetNormalizedPath(targetPath));
+            }
+        }
+    }
+
+    private static string GetNormalizedPath(string path) {
+        try {
+            string fullPath = Path.GetFullPath(path);
+            StringBuilder longPath = new StringBuilder(1024);
+            uint result = GetLongPathName(fullPath, longPath, (uint)longPath.Capacity);
+            if (result > 0 && result < longPath.Capacity) {
+                return longPath.ToString();
+            }
+            return fullPath;
+        } catch {
+            return path;
+        }
+    }
+
+    private static void CheckForbidden(string path) {
+        string fullPath = GetNormalizedPath(path);
+        foreach (string forbidden in forbiddenPaths) {
+            if (fullPath.Equals(forbidden, StringComparison.OrdinalIgnoreCase) || 
+                fullPath.StartsWith(forbidden + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) {
+                throw new UnauthorizedAccessException("Access to forbidden path is denied: " + path);
             }
         }
     }
@@ -427,6 +500,8 @@ public class GeminiSandbox {
                     SetNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, pSacl);
                 }
             }
+        } catch (Exception) {
+            // Ignore errors for individual paths
         } finally {
             if (pSD != IntPtr.Zero) LocalFree(pSD);
         }
