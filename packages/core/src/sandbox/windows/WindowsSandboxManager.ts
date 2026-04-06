@@ -60,12 +60,9 @@ export class WindowsSandboxManager implements SandboxManager {
    */
   private readonly allowedCache = new Set<string>();
   private readonly deniedCache = new Set<string>();
-  private manifestTempDir?: string;
-  private readonly exitCleanupHandler: () => void;
 
   constructor(private readonly options: GlobalSandboxOptions) {
     this.helperPath = path.resolve(__dirname, WindowsSandboxManager.HELPER_EXE);
-    this.exitCleanupHandler = () => this.cleanup();
   }
 
   isKnownSafeCommand(args: string[]): boolean {
@@ -327,18 +324,11 @@ export class WindowsSandboxManager implements SandboxManager {
     // 6. Create setup manifest if needed
     let manifestPath: string | undefined;
     if (pendingAcls.length > 0) {
-      if (!this.manifestTempDir) {
-        this.manifestTempDir = fs.mkdtempSync(
-          path.join(os.tmpdir(), 'gemini-cli-sandbox-'),
-        );
-        process.on('exit', this.exitCleanupHandler);
-      }
-
       manifestPath = path.join(
-        this.manifestTempDir,
-        `acls-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
+        os.tmpdir(),
+        `gemini-cli-sandbox-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
       );
-      fs.writeFileSync(manifestPath, pendingAcls.join('\n'));
+      fs.writeFileSync(manifestPath, pendingAcls.join('\n'), { mode: 0o600 });
     }
 
     const finalEnv = { ...sanitizedEnv };
@@ -355,7 +345,13 @@ export class WindowsSandboxManager implements SandboxManager {
       env: finalEnv,
       cwd: req.cwd,
       cleanup: () => {
-        // Cleanup handled by exit handler for the manifest temp dir
+        if (manifestPath) {
+          try {
+            fs.unlinkSync(manifestPath);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
       },
     };
   }
@@ -450,19 +446,5 @@ export class WindowsSandboxManager implements SandboxManager {
 
   getOptions(): GlobalSandboxOptions | undefined {
     return this.options;
-  }
-
-  cleanup(): void {
-    if (this.manifestTempDir && fs.existsSync(this.manifestTempDir)) {
-      try {
-        fs.rmSync(this.manifestTempDir, { recursive: true, force: true });
-        this.manifestTempDir = undefined;
-      } catch (e) {
-        debugLogger.log(
-          'WindowsSandboxManager: Failed to cleanup manifest dir:',
-          e,
-        );
-      }
-    }
   }
 }

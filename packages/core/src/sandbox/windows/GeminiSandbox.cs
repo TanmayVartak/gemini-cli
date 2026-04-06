@@ -472,14 +472,13 @@ public class GeminiSandbox {
                         IntPtr pSacl;
                         bool saclDefaulted;
                         if (GetSecurityDescriptorSacl(pSD, out saclPresent, out pSacl, out saclDefaulted) && saclPresent) {
-                            uint res = SetNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, pSacl);
-                            if (res != 0) Console.Error.WriteLine("SetNamedSecurityInfo failed for " + path + " with error code: " + res);
+                            SetNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, pSacl);
                         }
-                    } else {
-                        Console.Error.WriteLine("ConvertStringSecurityDescriptorToSecurityDescriptor failed: " + Marshal.GetLastWin32Error());
                     }
-                } catch(Exception e) {
-                    Console.Error.WriteLine("Error in SetLowIntegritySacl for " + path + ": " + e.Message);
+                } catch {
+                    // Ignore errors for individual paths
+                } finally {
+                    // We can't free pSD here easily if we declare it inside the try block without changing scope, but LocalFree is robust.
                 }
 
                 try {
@@ -494,8 +493,8 @@ public class GeminiSandbox {
                         fs.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier("S-1-16-4096"), FileSystemRights.Modify, AccessControlType.Allow));
                         fInfo.SetAccessControl(fs);
                     }
-                } catch(Exception e) {
-                    Console.Error.WriteLine("Error in GrantLowIntegrityDacl for " + path + ": " + e.Message);
+                } catch {
+                    // Ignore access errors
                 }
             } else if (op == 'D') {
                 DenyLowIntegrityDacl(path);

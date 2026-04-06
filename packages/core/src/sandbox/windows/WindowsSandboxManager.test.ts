@@ -70,7 +70,6 @@ describe('WindowsSandboxManager', () => {
   });
 
   afterEach(() => {
-    manager?.cleanup();
     vi.restoreAllMocks();
     if (testCwd && fs.existsSync(testCwd)) {
       fs.rmSync(testCwd, { recursive: true, force: true });
@@ -99,7 +98,7 @@ describe('WindowsSandboxManager', () => {
       '0',
       testCwd,
       '--setup-manifest',
-      expect.stringMatching(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+      expect.stringMatching(/gemini-cli-sandbox-.*\.txt$/),
       'whoami',
       '/groups',
     ]);
@@ -219,7 +218,7 @@ describe('WindowsSandboxManager', () => {
 
     const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
     const aclCall = writeFileSyncCalls.find((call) =>
-      String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+      String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
     );
     expect(aclCall).toBeDefined();
     expect(aclCall![1]).toContain(`L ${persistentPath}`);
@@ -289,7 +288,7 @@ describe('WindowsSandboxManager', () => {
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
-        String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+        String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
       );
       expect(aclCall).toBeDefined();
       expect(aclCall![1]).toContain(`L ${path.resolve(testCwd)}`);
@@ -320,7 +319,7 @@ describe('WindowsSandboxManager', () => {
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
-        String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+        String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
       );
       expect(aclCall).toBeDefined();
       expect(aclCall![1]).toContain(`L ${path.resolve(extraWritePath)}`);
@@ -356,7 +355,7 @@ describe('WindowsSandboxManager', () => {
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
-        String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+        String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
       );
       if (aclCall) {
         expect(aclCall[1]).not.toContain(`L ${uncPath}`);
@@ -391,7 +390,7 @@ describe('WindowsSandboxManager', () => {
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
-        String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+        String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
       );
       expect(aclCall).toBeDefined();
       expect(aclCall![1]).toContain(`L ${path.resolve(longPath)}`);
@@ -428,7 +427,7 @@ describe('WindowsSandboxManager', () => {
     // Should NOT have included the missing path in the ACL manifest
     const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
     const aclCall = writeFileSyncCalls.find((call) =>
-      String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+      String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
     );
     if (aclCall) {
       expect(aclCall[1]).not.toContain(`D ${path.resolve(missingPath)}`);
@@ -454,7 +453,7 @@ describe('WindowsSandboxManager', () => {
 
     const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
     const aclCall = writeFileSyncCalls.find((call) =>
-      String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+      String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
     );
     expect(aclCall).toBeDefined();
     expect(aclCall![1]).toContain(`D ${path.resolve(envFile)}`);
@@ -502,7 +501,7 @@ describe('WindowsSandboxManager', () => {
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
-        String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+        String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
       );
       expect(aclCall).toBeDefined();
       expect(aclCall![1]).toContain(`D ${path.resolve(forbiddenPath)}`);
@@ -533,7 +532,7 @@ describe('WindowsSandboxManager', () => {
 
       const writeFileSyncCalls = vi.mocked(fs.writeFileSync).mock.calls;
       const aclCall = writeFileSyncCalls.find((call) =>
-        String(call[0]).match(/gemini-cli-sandbox-[^/\\]+[/\\]acls-.*\.txt$/),
+        String(call[0]).match(/gemini-cli-sandbox-.*\.txt$/),
       );
       expect(aclCall).toBeDefined();
 
@@ -612,10 +611,7 @@ describe('WindowsSandboxManager', () => {
 
     expect(fs.existsSync(manifestPath)).toBe(true);
 
-    // Result cleanup is empty now because we use process exit handler,
-    // but the manager cleanup should handle it.
-    manager!.cleanup();
+    result.cleanup?.();
     expect(fs.existsSync(manifestPath)).toBe(false);
-    expect(fs.existsSync(path.dirname(manifestPath))).toBe(false);
   });
 });
