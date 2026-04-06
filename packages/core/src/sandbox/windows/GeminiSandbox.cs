@@ -467,7 +467,7 @@ public class GeminiSandbox {
                 try {
                     IntPtr pSD = IntPtr.Zero;
                     uint sdSize;
-                    if (ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;OICI;NW;;;LW)", 1, out pSD, out sdSize)) {
+                    if (ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;;NW;;;LW)", 1, out pSD, out sdSize)) {
                         bool saclPresent;
                         IntPtr pSacl;
                         bool saclDefaulted;
