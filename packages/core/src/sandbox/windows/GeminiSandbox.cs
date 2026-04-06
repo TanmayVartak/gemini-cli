@@ -414,13 +414,63 @@ public class GeminiSandbox {
         foreach (string line in File.ReadAllLines(manifestPath)) {
             if (string.IsNullOrWhiteSpace(line) || line.Length < 3) continue;
             char op = line[0];
-            string targetPath = line.Substring(2).Trim();
+            string path = line.Substring(2).Trim();
             if (op == 'L') {
-                SetLowIntegritySacl(targetPath);
+                try {
+                    IntPtr pSD = IntPtr.Zero;
+                    uint sdSize;
+                    if (ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;OICI;NW;;;LW)", 1, out pSD, out sdSize)) {
+                        bool saclPresent;
+                        IntPtr pSacl;
+                        bool saclDefaulted;
+                        if (GetSecurityDescriptorSacl(pSD, out saclPresent, out pSacl, out saclDefaulted) && saclPresent) {
+                            uint res = SetNamedSecurityInfo(path, 1, 16, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, pSacl);
+                            if (res != 0) Console.Error.WriteLine("SetNamedSecurityInfo failed for " + path + " with error code: " + res);
+                        }
+                    } else {
+                        Console.Error.WriteLine("ConvertStringSecurityDescriptorToSecurityDescriptor failed: " + Marshal.GetLastWin32Error());
+                    }
+                } catch(Exception e) {
+                    Console.Error.WriteLine("Error in SetLowIntegritySacl for " + path + ": " + e.Message);
+                }
+                
+                try {
+                    if (Directory.Exists(path)) {
+                        DirectoryInfo dInfo = new DirectoryInfo(path);
+                        DirectorySecurity ds = dInfo.GetAccessControl();
+                        ds.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier("S-1-16-4096"), FileSystemRights.Modify, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                        dInfo.SetAccessControl(ds);
+                    } else if (File.Exists(path)) {
+                        FileInfo fInfo = new FileInfo(path);
+                        FileSecurity fs = fInfo.GetAccessControl();
+                        fs.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier("S-1-16-4096"), FileSystemRights.Modify, AccessControlType.Allow));
+                        fInfo.SetAccessControl(fs);
+                    }
+                } catch(Exception e) {
+                    Console.Error.WriteLine("Error in GrantLowIntegrityDacl for " + path + ": " + e.Message);
+                }
             } else if (op == 'D') {
-                DenyLowIntegrityDacl(targetPath);
-                forbiddenPaths.Add(GetNormalizedPath(targetPath));
+                DenyLowIntegrityDacl(path);
+                forbiddenPaths.Add(GetNormalizedPath(path));
             }
+        }
+    }
+
+    private static void GrantLowIntegrityDacl(string path) {
+        try {
+            if (Directory.Exists(path)) {
+                DirectoryInfo dInfo = new DirectoryInfo(path);
+                DirectorySecurity ds = dInfo.GetAccessControl();
+                ds.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier("S-1-16-4096"), FileSystemRights.Modify, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                dInfo.SetAccessControl(ds);
+            } else if (File.Exists(path)) {
+                FileInfo fInfo = new FileInfo(path);
+                FileSecurity fs = fInfo.GetAccessControl();
+                fs.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier("S-1-16-4096"), FileSystemRights.Modify, AccessControlType.Allow));
+                fInfo.SetAccessControl(fs);
+            }
+        } catch (Exception ex) {
+            Console.Error.WriteLine("Error in GrantLowIntegrityDacl for " + path + ": " + ex.Message);
         }
     }
 
@@ -494,14 +544,23 @@ public class GeminiSandbox {
     private static void SetLowIntegritySacl(string path) {
         IntPtr pSD = IntPtr.Zero;
         try {
-            // S:(ML;;NW;;;LW) - SACL, Mandatory Label, No Write Up, Low Mandatory Level
-            if (ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;;NW;;;LW)", 1, out pSD, out uint sdSize)) {
-                if (GetSecurityDescriptorSacl(pSD, out bool saclPresent, out IntPtr pSacl, out bool saclDefaulted) && saclPresent) {
-                    SetNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, pSacl);
+            // S:(ML;OICI;NW;;;LW) - SACL, Mandatory Label, Object Inherit, Container Inherit, No Write Up, Low Mandatory Level
+            uint sdSize;
+            if (ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;OICI;NW;;;LW)", 1, out pSD, out sdSize)) {
+                bool saclPresent;
+                IntPtr pSacl;
+                bool saclDefaulted;
+                if (GetSecurityDescriptorSacl(pSD, out saclPresent, out pSacl, out saclDefaulted) && saclPresent) {
+                    uint result = SetNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, pSacl);
+                    if (result != 0) {
+                        Console.Error.WriteLine("SetNamedSecurityInfo failed for " + path + " with error code: " + result);
+                    }
                 }
+            } else {
+                Console.Error.WriteLine("ConvertStringSecurityDescriptorToSecurityDescriptor failed: " + Marshal.GetLastWin32Error());
             }
-        } catch (Exception) {
-            // Ignore errors for individual paths
+        } catch (Exception ex) {
+            Console.Error.WriteLine("Error in SetLowIntegritySacl: " + ex.Message);
         } finally {
             if (pSD != IntPtr.Zero) LocalFree(pSD);
         }
